@@ -1,6 +1,15 @@
 # gpu-nn-ops
  Highly optimized GPU ops to be compiled with NVCC on your machine.<br>
  
+<b>Ops try to use:</b>
+<ul>
+ <li>Shared memory</li>
+ <li>Registers</li>
+ <li>float4 loads and stores</li>
+ <li>warp and half warp optimized loads</li>
+ <li>256 max threads per block to support GPUs other than Nvidia</li>
+</ul>
+ 
 <b>Current state of the repo :</b><br>
 <ul>
  <li>sgemm</li>
