@@ -3,6 +3,20 @@
 
 #define DLLEXPORT extern "C" __declspec(dllexport)
 
+cudaStream_t mem_streams[4];
+int mem_stream_p = 0;
+
+// Init
+DLLEXPORT void init() {
+    for (int i = 0; i < 4; i++) {
+        cudaError_t result = cudaStreamCreate(&(mem_streams[i]));
+        if (result != cudaSuccess) {
+            exit(0);
+        }
+    }
+}
+
+
 // Memory
 
 DLLEXPORT float* avx2_malloc(unsigned long long size) {
@@ -14,6 +28,17 @@ DLLEXPORT float* cuda_malloc(unsigned long long size) {
     cudaMalloc(&mem, sizeof(float) * size);
     cudaMemset(mem, 0, sizeof(float) * size);
     return mem;
+}
+
+DLLEXPORT float* cuda_malloc_host(unsigned long long size) {
+    float* mem;
+    cudaMallocHost(&mem, sizeof(float) * size);
+    cudaMemset(mem, 0, sizeof(float) * size);
+    return mem;
+}
+
+DLLEXPORT float* cuda_pointer_offset(float* d, long offset) {
+    return d + offset;
 }
 
 DLLEXPORT void cuda_memreset(float* mem, unsigned long long size) {
@@ -29,39 +54,34 @@ DLLEXPORT void cuda_memcpy(float* h, float* d, long size, int dir) {
     }
 }
 
-DLLEXPORT void cuda_memcpy2d(float* h, float* d, long M, long N, long ldn, int dir) {
+DLLEXPORT int cuda_memcpyasync(float* h, float* d, long size, int dir) {
+    cudaStream_t stream;
+    cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking);
     if (dir == 0) {
-        for (int m = 0; m < M; m++) {
-            cudaMemcpy(d + m * ldn, h + m * N, sizeof(float) * N, cudaMemcpyHostToDevice);
-        }
+        cudaMemcpyAsync(d, h, sizeof(float) * size, cudaMemcpyHostToDevice, stream);
     }
     else {
-        for (int m = 0; m < M; m++) {
-            cudaMemcpy(h + m * N, d + m * ldn, sizeof(float) * N, cudaMemcpyDeviceToHost);
-        }
+        cudaMemcpyAsync(h, d, sizeof(float) * size, cudaMemcpyDeviceToHost, stream);
     }
+    return mem_stream_p - 1;
 }
-
-DLLEXPORT void cuda_memcpy3d(float* h, float* d, long H, long W, long C, long ldw, long ldc, int dir) {
-    if (dir == 0) {
-        for (int x = 0; x < H; x++) {
-            for (int y = 0; y < W; y++) {
-                cudaMemcpy(d + x * ldw * ldc + y * ldc, h + x * W * C + y * C, sizeof(float) * C, cudaMemcpyHostToDevice);
-            }
-        }
-    }
-    else {
-        for (int x = 0; x < H; x++) {
-            for (int y = 0; y < W; y++) {
-                cudaMemcpy(h + x * W * C + y * C, d + x * ldw * ldc + y * ldc, sizeof(float) * C, cudaMemcpyDeviceToHost);
-            }
-        }
-    }
-}
-
 
 DLLEXPORT void cuda_free(float* x) {
     cudaFree(x);
+}
+
+DLLEXPORT void cuda_sync() {
+    cudaDeviceSynchronize();
+}
+
+DLLEXPORT long cuda_get_free_mem() {
+    size_t free, total;
+    cudaMemGetInfo(&free, &total);
+    return free;
+}
+
+DLLEXPORT void cuda_reset() {
+    cudaDeviceReset();
 }
 
 
@@ -120,6 +140,27 @@ DLLEXPORT void cuda_memset_pntr(float* dx, float* v, int index, int size) {
 }
 
 
+// Membroadcast
+
+__global__ void membroadcast(float* x, float* v, int xsize, int vsize) {
+
+    int i = blockIdx.x * 256 + threadIdx.x;
+
+    if (i < xsize) {
+        int p = i / (xsize / vsize);
+        x[i] = v[p];
+    }
+
+}
+
+DLLEXPORT void cuda_membroadcast(float* dx, float* v, int xsize, int vsize) {
+
+    dim3 gridDims((int)ceil((float)xsize / 256), 1, 1);
+    dim3 blockDims(256, 1, 1);
+    membroadcast << <gridDims, blockDims >> > (dx, v, xsize, vsize);
+}
+
+
 
 // Squared Difference
 
@@ -140,6 +181,22 @@ DLLEXPORT void cuda_squared_difference(float* dh, float* dy, float* dout, int si
     squared_difference << <gridDims, blockDims >> > (dh, dy, dout, size);
 }
 
+__global__ void squared_difference_back(float* h, float* y, float* grad, float* out, int size) {
+
+    int x = blockIdx.x * 256 + threadIdx.x;
+
+    if (x >= size) { return; }
+
+    float v = (h[x] - y[x]) * grad[x];
+    out[x] = 2 * v;
+
+}
+
+DLLEXPORT void cuda_squared_difference_back(float* dh, float* dy, float* dgrad, float* dout, int size) {
+    dim3 gridDims((int)ceil((float)size / 256), 1, 1);
+    dim3 blockDims(256, 1, 1);
+    squared_difference_back << <gridDims, blockDims >> > (dh, dy, dgrad, dout, size);
+}
 
 
 // Multiply Subtract
@@ -207,21 +264,25 @@ __global__ void strided_sum(float* x, float* out, int stride, int size) {
 
     if (i < stride) {
         int c = size / stride;
+        int b = blockIdx.y * c / gridDim.y;
+        c = (blockIdx.y + 1) * c / gridDim.y;
         float s = 0;
-        int p = i;
-        for (int j = 0; j < c; j++) {
+        int p = i + b * stride;
+        for (int j = b; j < c; j++) {
             s += x[p];
             p += stride;
         }
-        out[i] = s;
+        out[blockIdx.y * stride + i] = s;
     }
-
 }
 
 DLLEXPORT void cuda_strided_sum(float* dx, float* dout, int stride, int size) {
-    dim3 gridDims((int)ceil((float)stride / 256), 1, 1);
-    dim3 blockDims(256, 1, 1);
-    strided_sum << <gridDims, blockDims >> > (dx, dout, stride, size);
+    strided_sum << <dim3((int)ceil((float)stride / 256), 1, 1), dim3(256, 1, 1) >> > (dx, dout, stride, size);
+}
+
+DLLEXPORT void cuda_strided_sum_batched(float* dx, float* dout, float* dtmp, int stride, int size, int batches) {
+    strided_sum << <dim3((int)ceil((float)stride / 256), batches, 1), dim3(256, 1, 1) >> > (dx, dtmp, stride, size);
+    strided_sum << <dim3((int)ceil((float)stride / 256), 1, 1), dim3(256, 1, 1) >> > (dtmp, dout, stride, batches * stride);
 }
 
 
@@ -266,32 +327,29 @@ DLLEXPORT void cuda_add(float* dx, float* dy, float* dout, int size) {
 
 
 
-// Total Sum
+// Batched Sum
 
-__global__ void total_sum_pass(float* x, float* tmp, int size, int threads, int stride) {
+__global__ void batched_sum_pass(float* x, float* tmp, int size, int stride) {
 
-    int i = blockIdx.x * threads + threadIdx.x;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int b = blockIdx.y;
+    x += b * size;
 
-    int c = (int)ceil((float)size / stride);
+    int c = (int)ceil((float)(size - i) / stride);
 
     float s = 0;
-    float* p = x + i;
-    for (int j = 0; j < c - 1; j++) {
-        s += *p;
+    int p = i;
+    for (int j = 0; j < c; j++) {
+        s += x[p];
         p += stride;
     }
-    if ((c - 1) * stride + i < size) {
-        s += x[(c - 1) * stride + i];
-    }
-    tmp[i] = s;
-
+    tmp[b * stride + i] = s;
 }
 
-DLLEXPORT void cuda_total_sum(float* dx, float* dtmp, float* dout, int size) {
-    total_sum_pass << <dim3(8, 1, 1), dim3(256, 1, 1) >> > (dx, dtmp, size, 256, 2048);
-    total_sum_pass << <dim3(1, 1, 1), dim3(64, 1, 1) >> > (dtmp, dtmp, 2048, 64, 32);
-    total_sum_pass << <dim3(1, 1, 1), dim3(16, 1, 1) >> > (dtmp, dtmp, 32, 16, 2);
-    total_sum_pass << <dim3(1, 1, 1), dim3(1, 1, 1) >> > (dtmp, dtmp, 2, 1, 1);
-
-    indevcpy << <dim3(1, 1, 1), dim3(1, 1, 1) >> > (dtmp, dout, 1, 0, 0);
+DLLEXPORT void cuda_batched_sum(float* dx, float* dtmp1, float* dtmp2, float* dout, int size, int batches) {
+    batched_sum_pass << <dim3(8, batches, 1), dim3(256, 1, 1) >> > (dx, dtmp1, size, 2048);
+    batched_sum_pass << <dim3(1, batches, 1), dim3(64, 1, 1) >> > (dtmp1, dtmp2, 2048, 64);
+    batched_sum_pass << <dim3(1, batches, 1), dim3(32, 1, 1) >> > (dtmp2, dtmp1, 64, 32);
+    batched_sum_pass << <dim3(1, batches, 1), dim3(1, 1, 1) >> > (dtmp1, dtmp2, 32, 1);
+    indevcpy << <dim3((int)(ceil((float)batches/256)), 1, 1), dim3(256, 1, 1) >> > (dtmp2, dout, batches, 0, 0);
 }
