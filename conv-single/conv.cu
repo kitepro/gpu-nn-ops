@@ -1791,8 +1791,7 @@ __global__ void conv_sgemm_4x4x256_k(float* A, float* B, float* C, int H, int W,
 }
 
 
-/*
-__global__ void conv_sgemm_128x128x8_i(float* A, float* B, float* C, int H, int W, int Ch, int* M, int* N, int* K, int* offsetsA, int* offsetsB, int* Ks128) {
+__global__ void conv_sgemm_128x128x8_i(float* A, float* B, float* C, int H, int W, int Ch, int* M, int* N, int* K, int* offsetsA, int* offsetsB, int* Ks128, int minK) {
 
 
     __shared__ __align__(16) float sA[8][132];
@@ -1804,6 +1803,8 @@ __global__ void conv_sgemm_128x128x8_i(float* A, float* B, float* C, int H, int 
     int mb = blockIdx.x * 128;
     int nb = blockIdx.y * 128;
     int Kt = Ks128[blockIdx.z];
+
+    if (mb >= M[Kt] || nb >= N[Kt]) { return; }
 
     A += offsetsA[Kt];
     B += offsetsB[Kt];
@@ -1862,7 +1863,6 @@ __global__ void conv_sgemm_128x128x8_i(float* A, float* B, float* C, int H, int 
             rA.y = A[(mb + txm128) * K[Kt] + txb128 * 4 + 1];
             rA.z = A[(mb + txm128) * K[Kt] + txb128 * 4 + 2];
             rA.w = A[(mb + txm128) * K[Kt] + txb128 * 4 + 3];
-            //rA = *reinterpret_cast<float4*>(A + (mb + txm128) * K[Kt] + txb128 * 4);
         }
         else if (3 <= t1) {
             rA.x = A[(mb + txm128) * K[Kt] + txb128 * 4 + 0];
@@ -1894,7 +1894,6 @@ __global__ void conv_sgemm_128x128x8_i(float* A, float* B, float* C, int H, int 
             rB.y = B[txb32 * N[Kt] + nb + txm32 * 4 + 1];
             rB.z = B[txb32 * N[Kt] + nb + txm32 * 4 + 2];
             rB.w = B[txb32 * N[Kt] + nb + txm32 * 4 + 3];
-            //rB = *reinterpret_cast<float4*>(B + txb32 * N[Kt] + nb + txm32 * 4);
         }
         else if (3 <= t1) {
             rB.x = B[txb32 * N[Kt] + nb + txm32 * 4 + 0];
@@ -1939,7 +1938,6 @@ __global__ void conv_sgemm_128x128x8_i(float* A, float* B, float* C, int H, int 
                     rA.y = A[(mb + txm128) * K[Kt] + kb + 8 + txb128 * 4 + 1];
                     rA.z = A[(mb + txm128) * K[Kt] + kb + 8 + txb128 * 4 + 2];
                     rA.w = A[(mb + txm128) * K[Kt] + kb + 8 + txb128 * 4 + 3];
-                    //rA = *reinterpret_cast<float4*>(A + (mb + txm128) * K[Kt] + kb + 8 + txb128 * 4);
                 }
                 else if (3 <= t1) {
                     rA.x = A[(mb + txm128) * K[Kt] + kb + 8 + txb128 * 4 + 0];
@@ -1971,7 +1969,6 @@ __global__ void conv_sgemm_128x128x8_i(float* A, float* B, float* C, int H, int 
                     rB.y = B[(kb + 8 + txb32) * N[Kt] + nb + txm32 * 4 + 1];
                     rB.z = B[(kb + 8 + txb32) * N[Kt] + nb + txm32 * 4 + 2];
                     rB.w = B[(kb + 8 + txb32) * N[Kt] + nb + txm32 * 4 + 3];
-                    //rB = *reinterpret_cast<float4*>(B + (kb + 8 + txb32) * N[Kt] + nb + txm32 * 4);
                 }
                 else if (3 <= t1) {
                     rB.x = B[(kb + 8 + txb32) * N[Kt] + nb + txm32 * 4 + 0];
@@ -2086,38 +2083,57 @@ __global__ void conv_sgemm_128x128x8_i(float* A, float* B, float* C, int H, int 
             t.w = rC[m][3];
 
             int b = (mb + sAi1 + m);
-            int nw = ceil((float)W / Kt);
-            int h = (b / nw) * Kt;
-            int w = (b % nw) * Kt;
+            int nw = ceil((float)W / (Kt + minK));
+            int h = (b / nw) * (Kt + minK);
+            int w = (b % nw) * (Kt + minK) * Ch;
 
             int c = (nb + sBi1) % Ch;
-            int nh = h + ((nb + sBi1) / Ch) / Kt;
-            nw = w + ((nb + sBi1) / Ch) % Kt;
-            int p = 0;
+            int nh = h + ((nb + sBi1) / ((Kt + minK) * Ch));
+            nw = w + ((nb + sBi1) % ((Kt + minK) * Ch));
 
             if (4 <= t1) {
-                atomicAdd(C + nh * WC + nw * Ch + c + p++, t.x);
-                p = (p >= Ch) ? 0 * ((nw + 1 >= W) ? (nw = 0) * nh++ : nw++) : p;
-                atomicAdd(C + nh * WC + nw * Ch + c + p++, t.y);
-                p = (p >= Ch) ? 0 * ((nw + 1 >= W) ? (nw = 0) * nh++ : nw++) : p;
-                atomicAdd(C + nh * WC + nw * Ch + c + p++, t.z);
-                p = (p >= Ch) ? 0 * ((nw + 1 >= W) ? (nw = 0) * nh++ : nw++) : p;
-                atomicAdd(C + nh * WC + nw * Ch + c + p++, t.w);
+                if (nh < H && nw < WC) {
+                    atomicAdd(C + nh * WC + nw, t.x);
+                }
+                nw = (nw + 1 < w + (Kt + minK) * Ch) ? nw + 1 : w + 0 * (nh++);
+                if (nh < H && nw < WC) {
+                    atomicAdd(C + nh * WC + nw, t.y);
+                }
+                nw = (nw + 1 < w + (Kt + minK) * Ch) ? nw + 1 : w + 0 * (nh++);
+                if (nh < H && nw < WC) {
+                    atomicAdd(C + nh * WC + nw, t.z);
+                }
+                nw = (nw + 1 < w + (Kt + minK) * Ch) ? nw + 1 : w + 0 * (nh++);
+                if (nh < H && nw < WC) {
+                    atomicAdd(C + nh * WC + nw, t.w);
+                }
             }
             else if (3 <= t1) {
-                atomicAdd(C + nh * WC + nw * Ch + c + p++, t.x);
-                p = (p >= Ch) ? 0 * ((nw + 1 >= W) ? (nw = 0) * nh++ : nw++) : p;
-                atomicAdd(C + nh * WC + nw * Ch + c + p++, t.y);
-                p = (p >= Ch) ? 0 * ((nw + 1 >= W) ? (nw = 0) * nh++ : nw++) : p;
-                atomicAdd(C + nh * WC + nw * Ch + c + p++, t.z);
+                if (nh < H && nw < WC) {
+                    atomicAdd(C + nh * WC + nw, t.x);
+                }
+                nw = (nw + 1 < w + (Kt + minK) * Ch) ? nw + 1 : w + 0 * (nh++);
+                if (nh < H && nw < WC) {
+                    atomicAdd(C + nh * WC + nw, t.y);
+                }
+                nw = (nw + 1 < w + (Kt + minK) * Ch) ? nw + 1 : w + 0 * (nh++);
+                if (nh < H && nw < WC) {
+                    atomicAdd(C + nh * WC + nw, t.z);
+                }
             }
             else if (2 <= t1) {
-                atomicAdd(C + nh * WC + nw * Ch + c + p++, t.x);
-                p = (p >= Ch) ? 0 * ((nw + 1 >= W) ? (nw = 0) * nh++ : nw++) : p;
-                atomicAdd(C + nh * WC + nw * Ch + c + p++, t.y);
+                if (nh < H && nw < WC) {
+                    atomicAdd(C + nh * WC + nw, t.x);
+                }
+                nw = (nw + 1 < w + (Kt + minK) * Ch) ? nw + 1 : w + 0 * (nh++);
+                if (nh < H && nw < WC) {
+                    atomicAdd(C + nh * WC + nw, t.y);
+                }
             }
             else if (1 <= t1) {
-                atomicAdd(C + nh * WC + nw * Ch + c + p++, t.x);
+                if (nh < H && nw < WC) {
+                    atomicAdd(C + nh * WC + nw, t.x);
+                }
             }
 
 
@@ -2127,40 +2143,59 @@ __global__ void conv_sgemm_128x128x8_i(float* A, float* B, float* C, int H, int 
             t.w = rC[m][7];
 
             c = (nb + sBi2) % Ch;
-            nh = h + ((nb + sBi2) / Ch) / (Kt + minK);
-            nw = w + ((nb + sBi2) / Ch) % (Kt + minK);
-            p = 0;
+            nh = h + ((nb + sBi2) / ((Kt + minK) * Ch));
+            nw = w + ((nb + sBi2) % ((Kt + minK) * Ch));
 
             if (4 <= t2) {
-                atomicAdd(C + nh * WC + nw * Ch + c + p++, t.x);
-                p = (p >= Ch) ? 0 * ((nw + 1 >= W) ? (nw = 0) * nh++ : nw++) : p;
-                atomicAdd(C + nh * WC + nw * Ch + c + p++, t.y);
-                p = (p >= Ch) ? 0 * ((nw + 1 >= W) ? (nw = 0) * nh++ : nw++) : p;
-                atomicAdd(C + nh * WC + nw * Ch + c + p++, t.z);
-                p = (p >= Ch) ? 0 * ((nw + 1 >= W) ? (nw = 0) * nh++ : nw++) : p;
-                atomicAdd(C + nh * WC + nw * Ch + c + p++, t.w);
+                if (nh < H && nw < WC) {
+                    atomicAdd(C + nh * WC + nw, t.x);
+                }
+                nw = (nw + 1 < w + (Kt + minK) * Ch) ? nw + 1 : w + 0 * (nh++);
+                if (nh < H && nw < WC) {
+                    atomicAdd(C + nh * WC + nw, t.y);
+                }
+                nw = (nw + 1 < w + (Kt + minK) * Ch) ? nw + 1 : w + 0 * (nh++);
+                if (nh < H && nw < WC) {
+                    atomicAdd(C + nh * WC + nw, t.z);
+                }
+                nw = (nw + 1 < w + (Kt + minK) * Ch) ? nw + 1 : w + 0 * (nh++);
+                if (nh < H && nw < WC) {
+                    atomicAdd(C + nh * WC + nw, t.w);
+                }
             }
             else if (3 <= t2) {
-                atomicAdd(C + nh * WC + nw * Ch + c + p++, t.x);
-                p = (p >= Ch) ? 0 * ((nw + 1 >= W) ? (nw = 0) * nh++ : nw++) : p;
-                atomicAdd(C + nh * WC + nw * Ch + c + p++, t.y);
-                p = (p >= Ch) ? 0 * ((nw + 1 >= W) ? (nw = 0) * nh++ : nw++) : p;
-                atomicAdd(C + nh * WC + nw * Ch + c + p++, t.z);
+                if (nh < H && nw < WC) {
+                    atomicAdd(C + nh * WC + nw, t.x);
+                }
+                nw = (nw + 1 < w + (Kt + minK) * Ch) ? nw + 1 : w + 0 * (nh++);
+                if (nh < H && nw < WC) {
+                    atomicAdd(C + nh * WC + nw, t.y);
+                }
+                nw = (nw + 1 < w + (Kt + minK) * Ch) ? nw + 1 : w + 0 * (nh++);
+                if (nh < H && nw < WC) {
+                    atomicAdd(C + nh * WC + nw, t.z);
+                }
             }
             else if (2 <= t2) {
-                atomicAdd(C + nh * WC + nw * Ch + c + p++, t.x);
-                p = (p >= Ch) ? 0 * ((nw + 1 >= W) ? (nw = 0) * nh++ : nw++) : p;
-                atomicAdd(C + nh * WC + nw * Ch + c + p++, t.y);
+                if (nh < H && nw < WC) {
+                    atomicAdd(C + nh * WC + nw, t.x);
+                }
+                nw = (nw + 1 < w + (Kt + minK) * Ch) ? nw + 1 : w + 0 * (nh++);
+                if (nh < H && nw < WC) {
+                    atomicAdd(C + nh * WC + nw, t.y);
+                }
             }
             else if (1 <= t2) {
-                atomicAdd(C + nh * WC + nw * Ch + c + p++, t.x);
+                if (nh < H && nw < WC) {
+                    atomicAdd(C + nh * WC + nw, t.x);
+                }
             }
         }
     }
 
 }
 
-__global__ void conv_sgemm_32x32x8_i(float* A, float* B, float* C, int H, int W, int Ch, int* M, int* N, int* K, int* offsetsA, int* offsetsB, int* Ks32) {
+__global__ void conv_sgemm_32x32x8_i(float* A, float* B, float* C, int H, int W, int Ch, int* M, int* N, int* K, int* offsetsA, int* offsetsB, int* Ks32, int minK) {
 
     __shared__ __align__(16) float sA[8][32];
     __shared__ __align__(16) float sB[8][32];
@@ -2171,6 +2206,8 @@ __global__ void conv_sgemm_32x32x8_i(float* A, float* B, float* C, int H, int W,
     int mb = blockIdx.x * 32;
     int nb = blockIdx.y * 32;
     int Kt = Ks32[blockIdx.z];
+
+    if (mb >= M[Kt] || nb >= N[Kt]) { return; }
 
     A += offsetsA[Kt];
     B += offsetsB[Kt];
@@ -2220,7 +2257,6 @@ __global__ void conv_sgemm_32x32x8_i(float* A, float* B, float* C, int H, int W,
             rA.y = A[(mb + txm32) * K[Kt] + txb32 * 4 + 1];
             rA.z = A[(mb + txm32) * K[Kt] + txb32 * 4 + 2];
             rA.w = A[(mb + txm32) * K[Kt] + txb32 * 4 + 3];
-            //rA = *reinterpret_cast<float4*>(A + (mb + txm32) * K[Kt] + txb32 * 4);
         }
         else if (txb32 * 4 + 3 <= K[Kt]) {
             rA.x = A[(mb + txm32) * K[Kt] + txb32 * 4 + 0];
@@ -2252,7 +2288,6 @@ __global__ void conv_sgemm_32x32x8_i(float* A, float* B, float* C, int H, int W,
             rB.y = B[txb8 * N[Kt] + nb + txm8 * 4 + 1];
             rB.z = B[txb8 * N[Kt] + nb + txm8 * 4 + 2];
             rB.w = B[txb8 * N[Kt] + nb + txm8 * 4 + 3];
-            //rB = *reinterpret_cast<float4*>(B + txb8 * N[Kt] + nb + txm8 * 4);
         }
         else if (3 <= t1) {
             rB.x = B[txb8 * N[Kt] + nb + txm8 * 4 + 0];
@@ -2298,7 +2333,6 @@ __global__ void conv_sgemm_32x32x8_i(float* A, float* B, float* C, int H, int W,
                     rA.y = A[(mb + txm32) * K[Kt] + kb + 8 + txb32 * 4 + 1];
                     rA.z = A[(mb + txm32) * K[Kt] + kb + 8 + txb32 * 4 + 2];
                     rA.w = A[(mb + txm32) * K[Kt] + kb + 8 + txb32 * 4 + 3];
-                    //rA = *reinterpret_cast<float4*>(A + (mb + txm32) * K[Kt] + kb + 8 + txb32 * 4);
                 }
                 else if (kb + 8 + txb32 * 4 + 3 <= K[Kt]) {
                     rA.x = A[(mb + txm32) * K[Kt] + kb + 8 + txb32 * 4 + 0];
@@ -2330,7 +2364,6 @@ __global__ void conv_sgemm_32x32x8_i(float* A, float* B, float* C, int H, int W,
                     rB.y = B[(kb + 8 + txb8) * N[Kt] + nb + txm8 * 4 + 1];
                     rB.z = B[(kb + 8 + txb8) * N[Kt] + nb + txm8 * 4 + 2];
                     rB.w = B[(kb + 8 + txb8) * N[Kt] + nb + txm8 * 4 + 3];
-                    //rB = *reinterpret_cast<float4*>(B + (kb + 8 + txb8) * N[Kt] + nb + txm8 * 4);
                 }
                 else if (3 <= t1) {
                     rB.x = B[(kb + 8 + txb8) * N[Kt] + nb + txm8 * 4 + 0];
@@ -2358,48 +2391,45 @@ __global__ void conv_sgemm_32x32x8_i(float* A, float* B, float* C, int H, int W,
 
         // COMPUTE -------------------------
 
-        if (mb + wmb + txm16b2 * 4 < M[Kt] && nb + wnb + txm32b16 * 8 + txm32m2 * 4 < N[Kt]) {
-
-            float4 tA = *reinterpret_cast<float4*>((*psA)[0] + wmb + txm16b2 * 4);
-            rAs[0] = tA.x;
-            rAs[1] = tA.y;
-            rAs[2] = tA.z;
-            rAs[3] = tA.w;
-            float4 tB = *reinterpret_cast<float4*>((*psB)[0] + wnb + txm32b16 * 8 + txm32m2 * 4);
-            rBs[0] = tB.x;
-            rBs[1] = tB.y;
-            rBs[2] = tB.z;
-            rBs[3] = tB.w;
+        float4 tA = *reinterpret_cast<float4*>((*psA)[0] + wmb + txm16b2 * 4);
+        rAs[0] = tA.x;
+        rAs[1] = tA.y;
+        rAs[2] = tA.z;
+        rAs[3] = tA.w;
+        float4 tB = *reinterpret_cast<float4*>((*psB)[0] + wnb + txm32b16 * 8 + txm32m2 * 4);
+        rBs[0] = tB.x;
+        rBs[1] = tB.y;
+        rBs[2] = tB.z;
+        rBs[3] = tB.w;
 
 #pragma unroll
-            for (k = 0; k < 8; k++) {
+        for (k = 0; k < 8; k++) {
 
-                if (k < 8) {
-                    float4 tA = *reinterpret_cast<float4*>((*psA)[k + 1] + wmb + txm16b2 * 4);
-                    rAsb[0] = tA.x;
-                    rAsb[1] = tA.y;
-                    rAsb[2] = tA.z;
-                    rAsb[3] = tA.w;
-                    float4 tB = *reinterpret_cast<float4*>((*psB)[k + 1] + wnb + txm32b16 * 8 + txm32m2 * 4);
-                    rBsb[0] = tB.x;
-                    rBsb[1] = tB.y;
-                    rBsb[2] = tB.z;
-                    rBsb[3] = tB.w;
+            if (k < 8) {
+                float4 tA = *reinterpret_cast<float4*>((*psA)[k + 1] + wmb + txm16b2 * 4);
+                rAsb[0] = tA.x;
+                rAsb[1] = tA.y;
+                rAsb[2] = tA.z;
+                rAsb[3] = tA.w;
+                float4 tB = *reinterpret_cast<float4*>((*psB)[k + 1] + wnb + txm32b16 * 8 + txm32m2 * 4);
+                rBsb[0] = tB.x;
+                rBsb[1] = tB.y;
+                rBsb[2] = tB.z;
+                rBsb[3] = tB.w;
+            }
+
+#pragma unroll
+            for (m = 0; m < 4; m++) {
+#pragma unroll
+                for (n = 0; n < 4; n++) {
+                    rC[m][n] += rAs[m] * rBs[n];
                 }
+            }
 
 #pragma unroll
-                for (m = 0; m < 4; m++) {
-#pragma unroll
-                    for (n = 0; n < 4; n++) {
-                        rC[m][n] += rAs[m] * rBs[n];
-                    }
-                }
-
-#pragma unroll
-                for (m = 0; m < 4; m++) {
-                    rAs[m] = rAsb[m];
-                    rBs[m] = rBsb[m];
-                }
+            for (m = 0; m < 4; m++) {
+                rAs[m] = rAsb[m];
+                rBs[m] = rBsb[m];
             }
         }
 
@@ -2423,45 +2453,64 @@ __global__ void conv_sgemm_32x32x8_i(float* A, float* B, float* C, int H, int W,
             t.z = rC[m][2];
             t.w = rC[m][3];
 
-            int b = (M[Kt] - t1 + m);
-            int nw = ceil((float)W / Kt);
-            int h = (b / nw) * Kt;
-            int w = (b % nw) * Kt;
+            int b = M[Kt] - t1 + m;
+            int nw = ceil((float)W / (Kt + minK));
+            int h = (b / nw) * (Kt + minK);
+            int w = (b % nw) * (Kt + minK) * Ch;
 
             int c = (N[Kt] - t2) % Ch;
-            int nh = h + ((N[Kt] - t2) / Ch) / Kt;
-            nw = w + ((N[Kt] - t2) / Ch) % Kt;
-            int p = 0;
+            int nh = h + ((N[Kt] - t2) / ((Kt + minK) * Ch));
+            nw = w + ((N[Kt] - t2) % ((Kt + minK) * Ch));
 
             if (4 <= t2) {
-                atomicAdd(C + nh * WC + nw * Ch + c + p++, t.x);
-                p = (p >= Ch) ? 0 * ((nw + 1 >= W) ? (nw = 0) * nh++ : nw++) : p;
-                atomicAdd(C + nh * WC + nw * Ch + c + p++, t.y);
-                p = (p >= Ch) ? 0 * ((nw + 1 >= W) ? (nw = 0) * nh++ : nw++) : p;
-                atomicAdd(C + nh * WC + nw * Ch + c + p++, t.z);
-                p = (p >= Ch) ? 0 * ((nw + 1 >= W) ? (nw = 0) * nh++ : nw++) : p;
-                atomicAdd(C + nh * WC + nw * Ch + c + p++, t.w);
+                if (nh < H && nw < WC) {
+                    atomicAdd(C + nh * WC + nw, t.x);
+                }
+                nw = (nw + 1 < w + (Kt + minK) * Ch) ? nw + 1 : w + 0 * (nh++);
+                if (nh < H && nw < WC) {
+                    atomicAdd(C + nh * WC + nw, t.y);
+                }
+                nw = (nw + 1 < w + (Kt + minK) * Ch) ? nw + 1 : w + 0 * (nh++);
+                if (nh < H && nw < WC) {
+                    atomicAdd(C + nh * WC + nw, t.z);
+                }
+                nw = (nw + 1 < w + (Kt + minK) * Ch) ? nw + 1 : w + 0 * (nh++);
+                if (nh < H && nw < WC) {
+                    atomicAdd(C + nh * WC + nw, t.w);
+                }
             }
             else if (3 <= t2) {
-                atomicAdd(C + nh * WC + nw * Ch + c + p++, t.x);
-                p = (p >= Ch) ? 0 * ((nw + 1 >= W) ? (nw = 0) * nh++ : nw++) : p;
-                atomicAdd(C + nh * WC + nw * Ch + c + p++, t.y);
-                p = (p >= Ch) ? 0 * ((nw + 1 >= W) ? (nw = 0) * nh++ : nw++) : p;
-                atomicAdd(C + nh * WC + nw * Ch + c + p++, t.z);
+                if (nh < H && nw < WC) {
+                    atomicAdd(C + nh * WC + nw, t.x);
+                }
+                nw = (nw + 1 < w + (Kt + minK) * Ch) ? nw + 1 : w + 0 * (nh++);
+                if (nh < H && nw < WC) {
+                    atomicAdd(C + nh * WC + nw, t.y);
+                }
+                nw = (nw + 1 < w + (Kt + minK) * Ch) ? nw + 1 : w + 0 * (nh++);
+                if (nh < H && nw < WC) {
+                    atomicAdd(C + nh * WC + nw, t.z);
+                }
             }
             else if (2 <= t2) {
-                atomicAdd(C + nh * WC + nw * Ch + c + p++, t.x);
-                p = (p >= Ch) ? 0 * ((nw + 1 >= W) ? (nw = 0) * nh++ : nw++) : p;
-                atomicAdd(C + nh * WC + nw * Ch + c + p++, t.y);
+                if (nh < H && nw < WC) {
+                    atomicAdd(C + nh * WC + nw, t.x);
+                }
+                nw = (nw + 1 < w + (Kt + minK) * Ch) ? nw + 1 : w + 0 * (nh++);
+                if (nh < H && nw < WC) {
+                    atomicAdd(C + nh * WC + nw, t.y);
+                }
             }
             else if (1 <= t2) {
-                atomicAdd(C + nh * WC + nw * Ch + c + p++, t.x);
+                if (nh < H && nw < WC) {
+                    atomicAdd(C + nh * WC + nw, t.x);
+                }
             }
         }
     }
 }
 
-__global__ void conv_sgemm_4x4x256_i(float* A, float* B, float* C, int H, int W, int Ch, int* M, int* N, int* K, int* offsetsA, int* offsetsB, int* Ks4) {
+__global__ void conv_sgemm_4x4x256_i(float* A, float* B, float* C, int H, int W, int Ch, int* M, int* N, int* K, int* offsetsA, int* offsetsB, int* Ks4, int minK) {
 
     __shared__ __align__(16) float sA[4][256];
     __shared__ __align__(16) float sB[4][256];
@@ -2471,6 +2520,10 @@ __global__ void conv_sgemm_4x4x256_i(float* A, float* B, float* C, int H, int W,
     int mb = blockIdx.x * 4;
     int nb = blockIdx.y * 4;
     int Kt = Ks4[blockIdx.z];
+
+    if (mb >= M[Kt] || nb >= N[Kt]) {
+        return;
+    }
 
     int txm16 = tx % 16;
     int txb16 = tx / 16;
@@ -2505,7 +2558,6 @@ __global__ void conv_sgemm_4x4x256_i(float* A, float* B, float* C, int H, int W,
             rA.y = A[(mb + txb64) * K[Kt] + txm64 * 4 + 1];
             rA.z = A[(mb + txb64) * K[Kt] + txm64 * 4 + 2];
             rA.w = A[(mb + txb64) * K[Kt] + txm64 * 4 + 3];
-            //rA = *reinterpret_cast<float4*>(A + (mb + txb64) * K[Kt] + txm64 * 4);
         }
         else if (txm64 * 4 + 3 <= K[Kt]) {
             rA.x = A[(mb + txb64) * K[Kt] + txm64 * 4 + 0];
@@ -2537,7 +2589,6 @@ __global__ void conv_sgemm_4x4x256_i(float* A, float* B, float* C, int H, int W,
             rB.y = B[tx * N[Kt] + nb + 1];
             rB.z = B[tx * N[Kt] + nb + 2];
             rB.w = B[tx * N[Kt] + nb + 3];
-            //rB = *reinterpret_cast<float4*>(B + tx * N[Kt] + nb);
         }
         else if (3 <= t1) {
             rB.x = B[tx * N[Kt] + nb + 0];
@@ -2586,7 +2637,6 @@ __global__ void conv_sgemm_4x4x256_i(float* A, float* B, float* C, int H, int W,
                     rA.y = A[(mb + txb64) * K[Kt] + kb + 256 + txm64 * 4 + 1];
                     rA.z = A[(mb + txb64) * K[Kt] + kb + 256 + txm64 * 4 + 2];
                     rA.w = A[(mb + txb64) * K[Kt] + kb + 256 + txm64 * 4 + 3];
-                    //rA = *reinterpret_cast<float4*>(A + (mb + txb64) * K[Kt] + kb + 256 + txm64 * 4);
                 }
                 else if (kb + 256 + txm64 * 4 + 3 <= K[Kt]) {
                     rA.x = A[(mb + txb64) * K[Kt] + kb + 256 + txm64 * 4 + 0];
@@ -2618,7 +2668,6 @@ __global__ void conv_sgemm_4x4x256_i(float* A, float* B, float* C, int H, int W,
                     rB.y = B[(kb + 256 + tx) * N[Kt] + nb + 1];
                     rB.z = B[(kb + 256 + tx) * N[Kt] + nb + 2];
                     rB.w = B[(kb + 256 + tx) * N[Kt] + nb + 3];
-                    //rB = *reinterpret_cast<float4*>(B + (kb + 256 + tx) * N[Kt] + nb);
                 }
                 else if (3 <= t1) {
                     rB.x = B[(kb + 256 + tx) * N[Kt] + nb + 0];
@@ -2700,46 +2749,367 @@ __global__ void conv_sgemm_4x4x256_i(float* A, float* B, float* C, int H, int W,
                 t.z = rC[m][2] + sC[1][m][2] + sC[2][m][2] + sC[3][m][2] + sC[4][m][2] + sC[5][m][2] + sC[6][m][2] + sC[7][m][2];
                 t.w = rC[m][3] + sC[1][m][3] + sC[2][m][3] + sC[3][m][3] + sC[4][m][3] + sC[5][m][3] + sC[6][m][3] + sC[7][m][3];
 
-                int b = (mb + m);
-                int nw = ceil((float)W / Kt);
-                int h = (b / nw) * Kt;
-                int w = (b % nw) * Kt;
+                int b = mb + m;
+                int nw = ceil((float)W / (Kt + minK));
+                int h = (b / nw) * (Kt + minK);
+                int w = (b % nw) * (Kt + minK) * Ch;
 
                 int c = nb % Ch;
-                int nh = h + (nb / Ch) / Kt;
-                nw = w + (nb / Ch) % Kt;
-                int p = 0;
+                int nh = h + (nb / ((Kt + minK) * Ch));
+                nw = w + (nb % ((Kt + minK) * Ch));
 
                 if (nb + 4 <= N[Kt]) {
-                    atomicAdd(C + nh * WC + nw * Ch + c + p++, t.x);
-                    p = (p >= Ch) ? 0 * ((nw + 1 >= W) ? (nw = 0) * nh++ : nw++) : p;
-                    atomicAdd(C + nh * WC + nw * Ch + c + p++, t.y);
-                    p = (p >= Ch) ? 0 * ((nw + 1 >= W) ? (nw = 0) * nh++ : nw++) : p;
-                    atomicAdd(C + nh * WC + nw * Ch + c + p++, t.z);
-                    p = (p >= Ch) ? 0 * ((nw + 1 >= W) ? (nw = 0) * nh++ : nw++) : p;
-                    atomicAdd(C + nh * WC + nw * Ch + c + p++, t.w);
+                    if (nh < H && nw < WC) {
+                        atomicAdd(C + nh * WC + nw, t.x);
+                    }
+                    nw = (nw + 1 < w + (Kt + minK) * Ch) ? nw + 1 : w + 0 * (nh++);
+                    if (nh < H && nw < WC) {
+                        atomicAdd(C + nh * WC + nw, t.y);
+                    }
+                    nw = (nw + 1 < w + (Kt + minK) * Ch) ? nw + 1 : w + 0 * (nh++);
+                    if (nh < H && nw < WC) {
+                        atomicAdd(C + nh * WC + nw, t.z);
+                    }
+                    nw = (nw + 1 < w + (Kt + minK) * Ch) ? nw + 1 : w + 0 * (nh++);
+                    if (nh < H && nw < WC) {
+                        atomicAdd(C + nh * WC + nw, t.w);
+                    }
                 }
-                if (nb + 3 <= N[Kt]) {
-                    atomicAdd(C + nh * WC + nw * Ch + c + p++, t.x);
-                    p = (p >= Ch) ? 0 * ((nw + 1 >= W) ? (nw = 0) * nh++ : nw++) : p;
-                    atomicAdd(C + nh * WC + nw * Ch + c + p++, t.y);
-                    p = (p >= Ch) ? 0 * ((nw + 1 >= W) ? (nw = 0) * nh++ : nw++) : p;
-                    atomicAdd(C + nh * WC + nw * Ch + c + p++, t.z);
+                else if (nb + 3 <= N[Kt]) {
+                    if (nh < H && nw < WC) {
+                        atomicAdd(C + nh * WC + nw, t.x);
+                    }
+                    nw = (nw + 1 < w + (Kt + minK) * Ch) ? nw + 1 : w + 0 * (nh++);
+                    if (nh < H && nw < WC) {
+                        atomicAdd(C + nh * WC + nw, t.y);
+                    }
+                    nw = (nw + 1 < w + (Kt + minK) * Ch) ? nw + 1 : w + 0 * (nh++);
+                    if (nh < H && nw < WC) {
+                        atomicAdd(C + nh * WC + nw, t.z);
+                    }
                 }
-                if (nb + 2 <= N[Kt]) {
-                    atomicAdd(C + nh * WC + nw * Ch + c + p++, t.x);
-                    p = (p >= Ch) ? 0 * ((nw + 1 >= W) ? (nw = 0) * nh++ : nw++) : p;
-                    atomicAdd(C + nh * WC + nw * Ch + c + p++, t.y);
+                else if (nb + 2 <= N[Kt]) {
+                    if (nh < H && nw < WC) {
+                        atomicAdd(C + nh * WC + nw, t.x);
+                    }
+                    nw = (nw + 1 < w + (Kt + minK) * Ch) ? nw + 1 : w + 0 * (nh++);
+                    if (nh < H && nw < WC) {
+                        atomicAdd(C + nh * WC + nw, t.y);
+                    }
                 }
-                if (nb + 1 <= N[Kt]) {
-                    atomicAdd(C + nh * WC + nw * Ch + c + p++, t.x);
+                else if (nb + 1 <= N[Kt]) {
+                    if (nh < H && nw < WC) {
+                        atomicAdd(C + nh * WC + nw, t.x);
+                    }
                 }
             }
         }
     }
 
 }
-*/
+
+
+
+__global__ void conv_sgemm_128x128x8_f_MSer(float* A, float* B, float* C, int H, int W, int Ch, int* M, int* N, int* K, int* offsetsB, int* offsetsC, int* KSer, int minK) {
+
+
+    __shared__ __align__(16) float sA[8][128];
+    __shared__ __align__(16) float sB[8][128];
+    __shared__ __align__(16) float sAb[8][128];
+    __shared__ __align__(16) float sBb[8][128];
+
+    int tx = threadIdx.x;
+    int mb = blockIdx.x * 128;
+    int nb = blockIdx.y * 128;
+    int Kt = KSer[blockIdx.y];
+
+    if (mb >= M[Kt] || nb >= N[Kt]) { return; }
+
+    B += offsetsB[Kt];
+    C += offsetsC[Kt];
+
+    float rC[8][8];
+    float4 rA;
+    float4 rB;
+    float rAs[8];
+    float rBs[8];
+    float rAsb[8];
+    float rBsb[8];
+
+    float(*psA)[8][128] = &sA;
+    float(*psB)[8][128] = &sB;
+
+    int txm32 = tx % 32;
+    int txb32 = tx / 32;
+    int txm16 = tx % 16;
+    int txb16 = tx / 16;
+    int txm2 = tx % 2;
+    int txb2 = tx / 2;
+    int txm8 = tx % 8;
+    int txb8 = tx / 8;
+    int txm128 = tx % 128;
+    int txb128 = tx / 128;
+    int txm32b4 = txm32 / 4;
+
+    int wnb = (txb32 / 4) * 64;
+    int wmb = (txb32 % 4) * 32;
+
+    int WC = W * Ch;
+
+    int m, n, k, kb, hbb, pbase, p;
+
+    int wc = ceil((float)W / (Kt + minK));
+    pbase = ((mb + txm128) % wc) * (Kt + minK) * Ch;
+    p = pbase + txb128 * 4;
+    hbb = ((mb + txm128) / wc) * (Kt + minK);
+    int hcap = min(hbb + (Kt + minK), H);
+    int cap = (hbb < H) ? pbase + (Kt + minK) * Ch : 0;
+
+    float4 f4;
+    float8 f8;
+
+    int sAi1 = wmb + (txm32 % 2) * 8 + (txm32 / 16) * 16;
+    int sBi1 = wnb + (txm32 / 2) * 4;
+    int sBi2 = wnb + (32 + (txm32 / 2) * 4) % 64;
+
+#pragma unroll
+    for (m = 0; m < 8; m++) {
+#pragma unroll
+        for (n = 0; n < 8; n++) {
+            rC[m][n] = 0;
+        }
+    }
+
+    if (mb + txm128 < M[Kt]) {
+        rA.x = (p < cap) ? ((p < WC) ? A[hbb * WC + p++] : (0 * p++)) : ((hbb + (p - pbase) / (cap - pbase) < hcap) ? ((pbase + (p - pbase) % (cap - pbase) < WC) ? A[(hbb += (p - pbase) / (cap - pbase)) * WC + (p = pbase + (p - pbase) % (cap - pbase))++] : 0 * (hbb += (p - pbase) / (cap - pbase)) * (p = pbase + (p - pbase) % (cap - pbase))++) : 0);
+        rA.y = (p < cap) ? ((p < WC) ? A[hbb * WC + p++] : (0 * p++)) : ((hbb + (p - pbase) / (cap - pbase) < hcap) ? ((pbase + (p - pbase) % (cap - pbase) < WC) ? A[(hbb += (p - pbase) / (cap - pbase)) * WC + (p = pbase + (p - pbase) % (cap - pbase))++] : 0 * (hbb += (p - pbase) / (cap - pbase)) * (p = pbase + (p - pbase) % (cap - pbase))++) : 0);
+        rA.z = (p < cap) ? ((p < WC) ? A[hbb * WC + p++] : (0 * p++)) : ((hbb + (p - pbase) / (cap - pbase) < hcap) ? ((pbase + (p - pbase) % (cap - pbase) < WC) ? A[(hbb += (p - pbase) / (cap - pbase)) * WC + (p = pbase + (p - pbase) % (cap - pbase))++] : 0 * (hbb += (p - pbase) / (cap - pbase)) * (p = pbase + (p - pbase) % (cap - pbase))++) : 0);
+        rA.w = (p < cap) ? ((p < WC) ? A[hbb * WC + p++] : (0 * p++)) : ((hbb + (p - pbase) / (cap - pbase) < hcap) ? ((pbase + (p - pbase) % (cap - pbase) < WC) ? A[(hbb += (p - pbase) / (cap - pbase)) * WC + (p = pbase + (p - pbase) % (cap - pbase))++] : 0 * (hbb += (p - pbase) / (cap - pbase)) * (p = pbase + (p - pbase) % (cap - pbase))++) : 0);
+        p += 4;
+    }
+    else {
+        rA.x = rA.y = rA.z = rA.w = 0;
+    }
+
+    if (nb + txm128 < N[Kt]) {
+        if (txb128 * 4 + 4 <= K[Kt]) {
+            rB.x = B[(nb + txm128) * K[Kt] + txb128 * 4 + 0];
+            rB.y = B[(nb + txm128) * K[Kt] + txb128 * 4 + 1];
+            rB.z = B[(nb + txm128) * K[Kt] + txb128 * 4 + 2];
+            rB.w = B[(nb + txm128) * K[Kt] + txb128 * 4 + 3];
+        }
+        else if (txb128 * 4 + 3 <= K[Kt]) {
+            rB.x = B[(nb + txm128) * K[Kt] + txb128 * 4 + 0];
+            rB.y = B[(nb + txm128) * K[Kt] + txb128 * 4 + 1];
+            rB.z = B[(nb + txm128) * K[Kt] + txb128 * 4 + 2];
+            rB.w = 0;
+        }
+        else if (txb128 * 4 + 2 <= K[Kt]) {
+            rB.x = B[(nb + txm128) * K[Kt] + txb128 * 4 + 0];
+            rB.y = B[(nb + txm128) * K[Kt] + txb128 * 4 + 1];
+            rB.z = rB.w = 0;
+        }
+        else if (txb128 * 4 + 1 <= K[Kt]) {
+            rB.x = B[(nb + txm128) * K[Kt] + txb128 * 4 + 0];
+            rB.y = rB.z = rB.w = 0;
+        }
+        else {
+            rB.x = rB.y = rB.z = rB.w = 0;
+        }
+    }
+    else {
+        rB.x = rB.y = rB.z = rB.w = 0;
+    }
+
+    for (kb = 0; kb < K[Kt]; kb += 8) {
+
+        (*psA)[txb128 * 4 + 0][txm128] = rA.x;
+        (*psA)[txb128 * 4 + 1][txm128] = rA.y;
+        (*psA)[txb128 * 4 + 2][txm128] = rA.z;
+        (*psA)[txb128 * 4 + 3][txm128] = rA.w;
+
+        (*psB)[txb128 * 4 + 0][txm128] = rB.x;
+        (*psB)[txb128 * 4 + 1][txm128] = rB.y;
+        (*psB)[txb128 * 4 + 2][txm128] = rB.z;
+        (*psB)[txb128 * 4 + 3][txm128] = rB.w;
+
+        __syncthreads();
+
+        if (kb + 8 < K[Kt]) {
+            if (mb + txm128 < M[Kt]) {
+                rA.x = (p < cap) ? ((p < WC) ? A[hbb * WC + p++] : (0 * p++)) : ((hbb + (p - pbase) / (cap - pbase) < hcap) ? ((pbase + (p - pbase) % (cap - pbase) < WC) ? A[(hbb += (p - pbase) / (cap - pbase)) * WC + (p = pbase + (p - pbase) % (cap - pbase))++] : 0 * (hbb += (p - pbase) / (cap - pbase)) * (p = pbase + (p - pbase) % (cap - pbase))++) : 0);
+                rA.y = (p < cap) ? ((p < WC) ? A[hbb * WC + p++] : (0 * p++)) : ((hbb + (p - pbase) / (cap - pbase) < hcap) ? ((pbase + (p - pbase) % (cap - pbase) < WC) ? A[(hbb += (p - pbase) / (cap - pbase)) * WC + (p = pbase + (p - pbase) % (cap - pbase))++] : 0 * (hbb += (p - pbase) / (cap - pbase)) * (p = pbase + (p - pbase) % (cap - pbase))++) : 0);
+                rA.z = (p < cap) ? ((p < WC) ? A[hbb * WC + p++] : (0 * p++)) : ((hbb + (p - pbase) / (cap - pbase) < hcap) ? ((pbase + (p - pbase) % (cap - pbase) < WC) ? A[(hbb += (p - pbase) / (cap - pbase)) * WC + (p = pbase + (p - pbase) % (cap - pbase))++] : 0 * (hbb += (p - pbase) / (cap - pbase)) * (p = pbase + (p - pbase) % (cap - pbase))++) : 0);
+                rA.w = (p < cap) ? ((p < WC) ? A[hbb * WC + p++] : (0 * p++)) : ((hbb + (p - pbase) / (cap - pbase) < hcap) ? ((pbase + (p - pbase) % (cap - pbase) < WC) ? A[(hbb += (p - pbase) / (cap - pbase)) * WC + (p = pbase + (p - pbase) % (cap - pbase))++] : 0 * (hbb += (p - pbase) / (cap - pbase)) * (p = pbase + (p - pbase) % (cap - pbase))++) : 0);
+                p += 4;
+            }
+            else {
+                rA.x = rA.y = rA.z = rA.w = 0;
+            }
+
+            if (nb + txm128 < N[Kt]) {
+                if (kb + 8 + txb128 * 4 + 4 <= K[Kt]) {
+                    rB.x = B[(nb + txm128) * K[Kt] + kb + 8 + txb128 * 4 + 0];
+                    rB.y = B[(nb + txm128) * K[Kt] + kb + 8 + txb128 * 4 + 1];
+                    rB.z = B[(nb + txm128) * K[Kt] + kb + 8 + txb128 * 4 + 2];
+                    rB.w = B[(nb + txm128) * K[Kt] + kb + 8 + txb128 * 4 + 3];
+                }
+                else if (kb + 8 + txb128 * 4 + 3 <= K[Kt]) {
+                    rB.x = B[(nb + txm128) * K[Kt] + kb + 8 + txb128 * 4 + 0];
+                    rB.y = B[(nb + txm128) * K[Kt] + kb + 8 + txb128 * 4 + 1];
+                    rB.z = B[(nb + txm128) * K[Kt] + kb + 8 + txb128 * 4 + 2];
+                    rB.w = 0;
+                }
+                else if (kb + 8 + txb128 * 4 + 2 <= K[Kt]) {
+                    rB.x = B[(nb + txm128) * K[Kt] + kb + 8 + txb128 * 4 + 0];
+                    rB.y = B[(nb + txm128) * K[Kt] + kb + 8 + txb128 * 4 + 1];
+                    rB.z = rB.w = 0;
+                }
+                else if (kb + 8 + txb128 * 4 + 1 <= K[Kt]) {
+                    rB.x = B[(nb + txm128) * K[Kt] + kb + 8 + txb128 * 4 + 0];
+                    rB.y = rB.z = rB.w = 0;
+                }
+                else {
+                    rB.x = rB.y = rB.z = rB.w = 0;
+                }
+            }
+            else {
+                rB.x = rB.y = rB.z = rB.w = 0;
+            }
+        }
+
+        // COMPUTE -------------------
+
+        f8 = *reinterpret_cast<float8*>((*psA)[0] + sAi1);
+        rAs[0] = f8.a;
+        rAs[1] = f8.b;
+        rAs[2] = f8.c;
+        rAs[3] = f8.d;
+        rAs[4] = f8.e;
+        rAs[5] = f8.f;
+        rAs[6] = f8.g;
+        rAs[7] = f8.h;
+        f4 = *reinterpret_cast<float4*>((*psB)[0] + sBi1);
+        rBs[0] = f4.x;
+        rBs[1] = f4.y;
+        rBs[2] = f4.z;
+        rBs[3] = f4.w;
+        f4 = *reinterpret_cast<float4*>((*psB)[0] + sBi2);
+        rBs[4] = f4.x;
+        rBs[5] = f4.y;
+        rBs[6] = f4.z;
+        rBs[7] = f4.w;
+
+#pragma unroll
+        for (k = 0; k < 8; k++) {
+
+            if (k < 7) {
+                f8 = *reinterpret_cast<float8*>((*psA)[k + 1] + sAi1);
+                rAsb[0] = f8.a;
+                rAsb[1] = f8.b;
+                rAsb[2] = f8.c;
+                rAsb[3] = f8.d;
+                rAsb[4] = f8.e;
+                rAsb[5] = f8.f;
+                rAsb[6] = f8.g;
+                rAsb[7] = f8.h;
+                f4 = *reinterpret_cast<float4*>((*psB)[k + 1] + sBi1);
+                rBsb[0] = f4.x;
+                rBsb[1] = f4.y;
+                rBsb[2] = f4.z;
+                rBsb[3] = f4.w;
+                f4 = *reinterpret_cast<float4*>((*psB)[k + 1] + sBi2);
+                rBsb[4] = f4.x;
+                rBsb[5] = f4.y;
+                rBsb[6] = f4.z;
+                rBsb[7] = f4.w;
+            }
+
+#pragma unroll
+            for (m = 0; m < 8; m++) {
+#pragma unroll
+                for (n = 0; n < 8; n++) {
+                    rC[m][n] += rAs[m] * rBs[n];
+                }
+            }
+
+#pragma unroll
+            for (m = 0; m < 8; m++) {
+                rAs[m] = rAsb[m];
+                rBs[m] = rBsb[m];
+            }
+
+        }
+
+        // ---------------------------
+
+        if (psA == &sA) {
+            psA = &sAb;
+            psB = &sBb;
+        }
+        else {
+            psA = &sA;
+            psB = &sB;
+        }
+
+    }
+
+    int t1 = N[Kt] - nb - sBi1;
+    int t2 = N[Kt] - nb - sBi2;
+
+#pragma unroll
+    for (m = 0; m < 8; m++) {
+        if (mb + sAi1 + m < M[Kt]) {
+            float4 t, z;
+            t.x = rC[m][0];
+            t.y = rC[m][1];
+            t.z = rC[m][2];
+            t.w = rC[m][3];
+            if (4 <= t1) {
+                C[(mb + sAi1 + m) * N[Kt] + nb + sBi1 + 0] = t.x;
+                C[(mb + sAi1 + m) * N[Kt] + nb + sBi1 + 1] = t.y;
+                C[(mb + sAi1 + m) * N[Kt] + nb + sBi1 + 2] = t.z;
+                C[(mb + sAi1 + m) * N[Kt] + nb + sBi1 + 3] = t.w;
+            }
+            else if (3 <= t1) {
+                C[(mb + sAi1 + m) * N[Kt] + nb + sBi1 + 0] = t.x;
+                C[(mb + sAi1 + m) * N[Kt] + nb + sBi1 + 1] = t.y;
+                C[(mb + sAi1 + m) * N[Kt] + nb + sBi1 + 2] = t.z;
+            }
+            else if (2 <= t1) {
+                C[(mb + sAi1 + m) * N[Kt] + nb + sBi1 + 0] = t.x;
+                C[(mb + sAi1 + m) * N[Kt] + nb + sBi1 + 1] = t.y;
+            }
+            else if (1 <= t1) {
+                C[(mb + sAi1 + m) * N[Kt] + nb + sBi1 + 0] = t.x;
+            }
+            z.x = rC[m][4];
+            z.y = rC[m][5];
+            z.z = rC[m][6];
+            z.w = rC[m][7];
+            if (4 <= t2) {
+                C[(mb + sAi1 + m) * N[Kt] + nb + sBi2 + 0] = z.x;
+                C[(mb + sAi1 + m) * N[Kt] + nb + sBi2 + 1] = z.y;
+                C[(mb + sAi1 + m) * N[Kt] + nb + sBi2 + 2] = z.z;
+                C[(mb + sAi1 + m) * N[Kt] + nb + sBi2 + 3] = z.w;
+            }
+            else if (3 <= t2) {
+                C[(mb + sAi1 + m) * N[Kt] + nb + sBi2 + 0] = z.x;
+                C[(mb + sAi1 + m) * N[Kt] + nb + sBi2 + 1] = z.y;
+                C[(mb + sAi1 + m) * N[Kt] + nb + sBi2 + 2] = z.z;
+            }
+            else if (2 <= t2) {
+                C[(mb + sAi1 + m) * N[Kt] + nb + sBi2 + 0] = z.x;
+                C[(mb + sAi1 + m) * N[Kt] + nb + sBi2 + 1] = z.y;
+            }
+            else if (1 <= t2) {
+                C[(mb + sAi1 + m) * N[Kt] + nb + sBi2 + 0] = z.x;
+            }
+        }
+    }
+
+}
+
 
 
 __global__ void conv_add_bias(float* out, float* bias, int* Ms, int* Ns, int* biasOffsets, int* outOffsets) {
@@ -2811,16 +3181,17 @@ DLLEXPORT void cuda_conv_sgemm_kerngrad(float* dimg, float* dkern, float* dout, 
 
 }
 
-DLLEXPORT void cuda_conv_sgemm_inpgrad(float* dimg, float* dkern, float* dout, int H, int W, int C, int* M, int* N, int* K, int* offsetsB, int* offsetsC, int* dims128, int* dims32, int* dims4, int* Ks128, int* Ks32, int* Ks4) {
+DLLEXPORT void cuda_conv_sgemm_inpgrad(float* dimg, float* dkern, float* dout, int H, int W, int C, int* M, int* N, int* K, int* offsetsB, int* offsetsC, int* dims128, int* dims32, int* dims4, int* Ks128, int* Ks32, int* Ks4, int minK) {
 
     if (dims128[0] != 0 && dims128[1] != 0 && dims128[2] != 0) {
-        //conv_sgemm_128x128x8_i << <dim3((int)ceil((float)hM[0] / 128), (int)ceil((float)maxN128 / 128), sgemm128 + 1), dim3(256, 1, 1) >> > (dout, dkern, dimg, H, W, C, M, K, N, offsetsC, offsetsB, minK);
+        //conv_sgemm_128x128x8_i << <dim3((int)ceil((float)dims128[0] / 128), (int)ceil((float)dims128[1] / 128), dims128[2]), dim3(256, 1, 1) >> > (dout, dkern, dimg, H, W, C, M, K, N, offsetsC, offsetsB, Ks128, minK);
+        conv_sgemm_128x128x8_i << <dim3(dims128[0], dims128[1], 1), dim3(256, 1, 1) >> > (dout, dkern, dimg, H, W, C, M, K, N, offsetsC, offsetsB, Ks128, minK);
     }
     if (dims32[0] != 0 && dims32[1] != 0 && dims32[2] != 0) {
-        //conv_sgemm_32x32x8_i << <dim3((int)ceil((float)hM[sgemm128 + 1] / 32), (int)ceil((float)maxN32 / 32), sgemm32 - sgemm128), dim3(64, 1, 1) >> > (dout, dkern, dimg, H, W, C, M, K, N, offsetsC, offsetsB, minK, sgemm128 + 1);
+        conv_sgemm_32x32x8_i << <dim3((int)ceil((float)dims32[0] / 32), (int)ceil((float)dims32[1] / 32), dims32[2]), dim3(64, 1, 1) >> > (dout, dkern, dimg, H, W, C, M, K, N, offsetsC, offsetsB, Ks32, minK);
     }
     if (dims4[0] != 0 && dims4[1] != 0 && dims4[2] != 0) {
-        //conv_sgemm_4x4x256_i << <dim3((int)ceil((float)hM[sgemm32 + 1] / 4), (int)ceil((float)maxN4 / 4), kc - sgemm32), dim3(256, 1, 1) >> > (dout, dkern, dimg, H, W, C, M, K, N, offsetsC, offsetsB, minK, sgemm32 + 1);
+        conv_sgemm_4x4x256_i << <dim3((int)ceil((float)dims4[0] / 4), (int)ceil((float)dims4[1] / 4), dims4[2]), dim3(256, 1, 1) >> > (dout, dkern, dimg, H, W, C, M, K, N, offsetsC, offsetsB, Ks4, minK);
     }
 
 }
